@@ -1,0 +1,183 @@
+﻿
+#import "PAT.Lib.VacciChain"; // For custom Vacci-Chain classes (C#). Source file name is "PAT.Lib.VacciChain.cs"
+
+enum {eventTemperature, eventExpiry, eventGeneric}; // Events which can be triggered to signal a vaccine or batch becoming faulty
+enum {addrOwner, addrAuthUser, addrPublicUser};     // Used to represent what type of agent is attempting to call a contract function
+
+var event_flags = [0,0,0];
+var event_data  = [0,0,0];
+
+hvar rand_batch_id = 0;
+hvar added_batch_id;
+
+var<BatchList>  batches;
+// var<FridgeList> fridges;
+
+// Contract function to add a new batch
+Add_Batch(caller) = 
+	batch_add{
+		if (caller == addrOwner || caller == addrAuthUser)
+		{
+			batches.addBatch(); // Automatically assigns ID
+		}
+	} -> Check_Invalidated(added_batch_id);
+
+Add_Valid_Batch(caller) = 
+	valid_batch_add{
+		if (caller == addrOwner || caller == addrAuthUser)
+		{
+			added_batch_id = batches.addBatchWithTemp(4);
+		}
+	} -> Check_Invalidated(added_batch_id);
+
+Add_Invalid_Batch(caller) = 
+	invalid_batch_add{
+		if (caller == addrOwner || caller == addrAuthUser)
+		{
+			added_batch_id = batches.addBatchWithTemp(9);
+		}
+	} -> Check_Invalidated(added_batch_id);
+
+Randomize_Batch_ID() = 
+	  [batches.count() > 0] r.0{rand_batch_id = 0;} -> Skip
+	[][batches.count() > 1] r.1{rand_batch_id = 1;} -> Skip
+	[][batches.count() > 2] r.2{rand_batch_id = 2;} -> Skip
+	[][batches.count() > 3] r.3{rand_batch_id = 3;} -> Skip
+	[][batches.count() > 4] r.4{rand_batch_id = 4;} -> Skip;
+
+// Contract function to update the temperature of a specific batch
+Update_Batch_Temp(caller, batch_id, temp) = 
+	if (temp >= 2 && temp <= 8) { Update_Batch_Temp_Valid(  caller, batch_id) }
+						   else { Update_Batch_Temp_Invalid(caller, batch_id) };
+
+Update_Batch_Temp_Valid(caller, batch_id) =
+	update_valid_temp.batch_id{
+		if (caller == addrOwner || caller == addrAuthUser)	
+		{
+			var fault_caused = batches.addTempLogByID(batch_id, 4);
+			if (fault_caused)
+			{
+				event_flags[eventTemperature] = 1;
+				event_data [eventTemperature] = batch_id;
+			}
+		}
+	} -> Check_Invalidated(batch_id);
+	
+Update_Batch_Temp_Invalid(caller, batch_id) =
+	update_invalid_temp.batch_id{
+		if (caller == addrOwner || caller == addrAuthUser)	
+		{
+			var fault_caused = batches.addTempLogByID(batch_id, 9);
+			if (fault_caused)
+			{
+				event_flags[eventTemperature] = 1;
+				event_data [eventTemperature] = batch_id;
+			}
+		}
+	} -> invalid_temp_committed -> Check_Invalidated(batch_id);
+
+// Checks if a batch is faulty and raises the corresponding event
+Check_Invalidated(batch_id) = 
+	if(batches.checkFaulty(batch_id))
+	{
+		batchFaulted.batch_id -> Skip
+	}
+	else
+	{
+		batchNotFaulted.batch_id -> Skip
+	};
+
+// Simulates a random temperature measurement on a random batch
+Random_Temp_Update(caller) =
+	{
+		if (caller == addrOwner || caller == addrAuthUser)
+		{
+			var fault_caused = batches.addRandomTempLog();
+			if (fault_caused)
+			{
+				event_flags[eventTemperature] = 1;
+			}
+		}
+	} -> Skip;
+	
+/* Authenticated User (i.e. Hospitals, Aggregator controllers, etc.) */
+
+AuthUser_AddBatch() = Add_Batch(addrAuthUser); Skip;
+AuthUser_Random_Temp_Update() = Random_Temp_Update(addrAuthUser); Skip;
+
+AuthUser_Update_Batch_Temp_Valid()   = Randomize_Batch_ID(); Update_Batch_Temp_Valid(  addrAuthUser, rand_batch_id); Skip;
+AuthUser_Update_Batch_Temp_Invalid() = Randomize_Batch_ID(); Update_Batch_Temp_Invalid(addrAuthUser, rand_batch_id); Skip;
+
+Authenticated_User() =
+	[batches.count() < 5 /*For tractability*/] AuthUser_AddBatch(); Authenticated_User()
+  [][batches.count() > 0                     ] temp_update_valid   -> AuthUser_Update_Batch_Temp_Valid()  ; Authenticated_User()
+  [][batches.count() > 0                     ] temp_update_invalid -> AuthUser_Update_Batch_Temp_Invalid(); Authenticated_User();
+  // Add additional authenticated user options i.e. update batch/vaccine info, 
+  // ability to execute commands out-of-order (and what vulnerabilities does this lead to?)
+
+/* */
+
+/* Additional Actors (Need further system specification to determine exact roles and permissions of each) */
+Manufacturer() = [batches.count() <  5] AuthUser_AddBatch(); Manufacturer()
+			   [][batches.count() >= 5] Skip;
+			   
+Aggregator()   = Skip; // "   "
+// ...
+
+// Include different variations of actors depending on their threat and access capabilities.
+
+/* */
+
+// The event listener (Raises a fault event in the trace any time a fault occurs)
+Event_Listener() = [event_flags[0] == 1] temperature_fault.event_data[0]{event_flags[0] = 0; event_data[0] = 0;} -> Event_Listener()
+				[] [event_flags[1] == 1]      expiry_fault.event_data[1]{event_flags[1] = 0; event_data[1] = 0;} -> Event_Listener()
+				[] [event_flags[2] == 1]     generic_fault.event_data[2]{event_flags[2] = 0; event_data[2] = 0;} -> Event_Listener();
+
+// Entry point for the system. Should contain all actors and active concurrent systems
+System() = Event_Listener() ||| Authenticated_User();
+
+// Include variety of systems for different attack / fault vectors; e.g. Man In The Middle, Rogue Manufacturer, Faulty Sensors, etc.
+// How much detail must be represented by the model?
+
+Faulty_Add_Example_1()    = Add_Invalid_Batch(addrAuthUser);
+Faulty_Update_Example_1() = Add_Batch(addrAuthUser); Update_Batch_Temp_Invalid(addrAuthUser, 0);
+
+#define can_add_batches (batches.count() > 0);
+#define all_batches_invalidated (batches.count() > 0 && batches.getFaultyCount() == batches.count());
+#define temperature_fault_caught (event_flags[eventTemperature] == 1);
+#define unfaulted_temp_out_of_range (batches.getFaultyCount() < batches.countBatchesWithPreviousInvalidTemperatures());
+
+#assert System() deadlockfree;
+#assert System() reaches can_add_batches;
+#assert System() reaches all_batches_invalidated;
+#assert System() reaches temperature_fault_caught;
+#assert System() reaches unfaulted_temp_out_of_range; // We do not want this state to be reached.
+
+#define first_batch_faulty (batches.checkFaulty(0));
+#define first_batch_unfaulty (!batches.checkFaulty(0));
+
+// LTL Assertions
+// Assert that adding or updating a batch with an out-of-range temperature will always result in the batch being (permanently) marked as faulty.
+#assert Faulty_Add_Example_1()    |= <>[] first_batch_faulty;
+#assert Faulty_Update_Example_1() |= <>[] first_batch_faulty;
+
+// Assert that updating a batch with an invalid temperature will permenantly prevent it from being read as unfaulty
+#assert Faulty_Update_Example_1() |= <> invalid_temp_committed R first_batch_unfaulty;
+// (R refers to the LTL "Release" operator [F1 R F2]; F2 is true until F1, then never true from that point onwards)
+
+// Currently all assertions hold.
+
+// Other requirements (Which of these situations should be modelled?):
+	// Traceability - In theory vaccine history should always be traceable and accurate, except for a few scenarios:
+	//					1. Vaccine data is not submitted to the chain (Faulty aggregator, No data connection, etc.).
+	//						This may be solved by faulting vaccines which have too large gaps in their history (e.g. 1hr+) 
+	//					2. The majority of nodes in the network become compromised and begin convincing new nodes of incorrect block history.
+	//					3. The thermometers/fridge themselves report incorrect temperatures
+	//					4. The aggregator is compromised
+	
+// Strengths of Blockchain implementation over traditional database implementation:
+	// Decentralization - There is no single point where information can be modified once committed.
+	//						In theory the majority of nodes on the chain must be compromised in order to convince other nodes of false information. 
+	
+	// Trust - All nodes participating in the blockchain can be sure they share the same ledger as all other nodes
+	//          This includes all vaccine information contained within the block history
